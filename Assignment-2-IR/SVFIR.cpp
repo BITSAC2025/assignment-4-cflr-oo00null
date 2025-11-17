@@ -5,6 +5,9 @@
 
 #include "Graphs/SVFG.h"
 #include "SVF-LLVM/SVFIRBuilder.h"
+#include <cstdlib>
+#include <string>
+#include <vector>
 
 using namespace SVF;
 using namespace llvm;
@@ -29,16 +32,29 @@ int main(int argc, char** argv)
 
     moduleNameVec = OptionBase::parseOptions(arg_num, arg_value, "SVF IR", "[options] <input-bitcode...>");
 
-    LLVMModuleSet::getLLVMModuleSet()->buildSVFModule(moduleNameVec);
+    std::vector<std::string> processed;
+    for (const auto &f : moduleNameVec)
+    {
+        if (f.size() > 2 && f.substr(f.size() - 2) == ".c")
+        {
+            std::string out = f.substr(0, f.size() - 2) + ".ll";
+            std::string cmd = std::string("clang -S -emit-llvm -O0 -Xclang -disable-O0-optnone -fno-discard-value-names ") + f + " -o " + out;
+            std::system(cmd.c_str());
+            processed.push_back(out);
+        }
+        else
+            processed.push_back(f);
+    }
 
-    // Instantiate an SVFIR builder
-    SVFIRBuilder builder;
+    SVFModule* svfModule = LLVMModuleSet::getLLVMModuleSet()->buildSVFModule(processed);
+    svfModule->buildSymbolTableInfo();
+
+    SVFIRBuilder builder(svfModule);
     cout << "Generating SVFIR(PAG), call graph and ICFG ..." << endl;
 
-    // TODO: here, generate SVFIR(PAG), call graph and ICFG, and dump them to files
-    //@{
-
-    //@}
+    SVFIR* pag = builder.build();
+    if (!pag)
+        return 1;
 
     return 0;
 }
