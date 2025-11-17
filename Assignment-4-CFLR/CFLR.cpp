@@ -32,108 +32,251 @@ int main(int argc, char **argv)
 }
 
 
+// void CFLR::solve()
+// {
+//     // TODO: complete this function. The implementations of graph and worklist are provided.
+//     //  You need to:
+//     //  1. implement the grammar production rules into code;
+//     //  2. implement the dynamic-programming CFL-reachability algorithm.
+//     //  You may need to add your new methods to 'CFLRGraph' and 'CFLR'.
+// }
+
 void CFLR::solve()
 {
-    // Implement a worklist-based dynamic programming CFL-reachability solver.
-    // The approach:
-    // 1) initialize the worklist with all existing graph edges
-    // 2) apply unary productions (e.g., Addr -> PT)
-    // 3) repeatedly pop an edge and compose it with adjacent edges using
-    //    the grammar productions to derive new edges until fixpoint.
-
-    using ProdMap = std::unordered_map<uint64_t, std::vector<EdgeLabel>>;
-
-    auto makeKey = [](EdgeLabel a, EdgeLabel b) {
-        return (uint64_t(a) << 32) | uint64_t(b);
-    };
-
-    // Production rules (pair -> vector of resulting labels)
-    ProdMap prods;
-
-    // Basic productions used for Andersen-like points-to CFLR
-    // Copy ; PT -> PT
-    prods[makeKey(Copy, PT)].push_back(PT);
-    // PT ; CopyBar -> PT
-    prods[makeKey(PT, CopyBar)].push_back(PT);
-
-    // Handle loads: (LoadBar ; PT) -> VP, (VP ; PT) -> PT
-    // These intermediate symbols (VP) help derive points-to through loads
-    prods[makeKey(LoadBar, PT)].push_back(VP);
-    prods[makeKey(VP, PT)].push_back(PT);
-
-    // You can extend this production table if necessary for more features.
-
-    // Helper to add new edges to graph and worklist (if not already present)
-    auto addNewEdge = [&](unsigned s, unsigned d, EdgeLabel l) {
-        if (!graph->hasEdge(s, d, l))
-        {
-            graph->addEdge(s, d, l);
-            workList.push(CFLREdge(s, d, l));
-            return true;
-        }
-        return false;
-    };
-
-    // 1) initialize worklist with all existing edges
-    for (auto &srcItr : graph->getSuccessorMap())
+    // Initialize worklist with all base edges (Addr, Copy, Store, Load)
+    for (auto &nodeItr : graph->getSuccessorMap())
     {
-        unsigned src = srcItr.first;
-        for (auto &lblItr : srcItr.second)
+        unsigned src = nodeItr.first;
+        for (auto &lblItr : nodeItr.second)
         {
-            EdgeLabel lbl = lblItr.first;
+            EdgeLabel label = lblItr.first;
             for (auto dst : lblItr.second)
             {
-                workList.push(CFLREdge(src, dst, lbl));
+                workList.push(CFLREdge(src, dst, label));
             }
         }
     }
 
-    // 2) process worklist until fixpoint
+    // Main CFL-reachability algorithm
     while (!workList.empty())
     {
-        CFLREdge e = workList.pop();
+        CFLREdge edge = workList.pop();
+        unsigned src = edge.src;
+        unsigned dst = edge.dst;
+        EdgeLabel label = edge.label;
 
-        // unary productions
-        if (e.label == Addr)
+        // Grammar production rules:
+        // The grammar follows the Dyck-CFL pattern for pointer analysis
+        
+        // Rule 1: PV -> Addr
+        // p --Addr--> o implies p --PV--> o (p points-to-value o)
+        if (label == Addr)
         {
-            addNewEdge(e.src, e.dst, PT);
+            if (!graph->hasEdge(src, dst, PV))
+            {
+                graph->addEdge(src, dst, PV);
+                graph->addEdge(dst, src, VPBar);
+                workList.push(CFLREdge(src, dst, PV));
+                workList.push(CFLREdge(dst, src, VPBar));
+            }
         }
 
-        // forward composition: e (u->v,l1) with (v->w,l2) => (u->w, new)
-        auto &succMap = graph->getSuccessorMap();
-        auto succIt = succMap.find(e.dst);
-        if (succIt != succMap.end())
+        // Rule 2: SV -> PV Copy
+        // p --PV--> o1, o1 --Copy--> o2 implies p --SV--> o2
+        if (label == PV)
         {
-            for (auto &lbl2Itr : succIt->second)
+            auto &copySuccs = graph->getSuccessorMap()[dst][Copy];
+            for (auto next : copySuccs)
             {
-                EdgeLabel l2 = lbl2Itr.first;
-                uint64_t key = makeKey(e.label, l2);
-                auto pIt = prods.find(key);
-                if (pIt == prods.end()) continue;
-                for (auto w : lbl2Itr.second)
+                if (!graph->hasEdge(src, next, SV))
                 {
-                    for (auto resLbl : pIt->second)
-                        addNewEdge(e.src, w, resLbl);
+                    graph->addEdge(src, next, SV);
+                    graph->addEdge(next, src, VSBar);
+                    workList.push(CFLREdge(src, next, SV));
+                    workList.push(CFLREdge(next, src, VSBar));
+                }
+            }
+        }
+        if (label == Copy)
+        {
+            auto &pvPreds = graph->getPredecessorMap()[src][PV];
+            for (auto prev : pvPreds)
+            {
+                if (!graph->hasEdge(prev, dst, SV))
+                {
+                    graph->addEdge(prev, dst, SV);
+                    graph->addEdge(dst, prev, VSBar);
+                    workList.push(CFLREdge(prev, dst, SV));
+                    workList.push(CFLREdge(dst, prev, VSBar));
                 }
             }
         }
 
-        // backward composition: (x->u,l2) with e (u->v,l1) => (x->v, new)
-        auto &predMap = graph->getPredecessorMap();
-        auto predIt = predMap.find(e.src);
-        if (predIt != predMap.end())
+        // Rule 3: PV -> SV CopyBar
+        // p --SV--> o1, o2 --Copy--> o1 implies p --PV--> o2
+        if (label == SV)
         {
-            for (auto &lbl2Itr : predIt->second)
+            auto &copyBarPreds = graph->getPredecessorMap()[dst][CopyBar];
+            for (auto prev : copyBarPreds)
             {
-                EdgeLabel l2 = lbl2Itr.first;
-                uint64_t key = makeKey(l2, e.label);
-                auto pIt = prods.find(key);
-                if (pIt == prods.end()) continue;
-                for (auto x : lbl2Itr.second)
+                if (!graph->hasEdge(src, prev, PV))
                 {
-                    for (auto resLbl : pIt->second)
-                        addNewEdge(x, e.dst, resLbl);
+                    graph->addEdge(src, prev, PV);
+                    graph->addEdge(prev, src, VPBar);
+                    workList.push(CFLREdge(src, prev, PV));
+                    workList.push(CFLREdge(prev, src, VPBar));
                 }
+            }
+        }
+        if (label == CopyBar)
+        {
+            auto &svSuccs = graph->getSuccessorMap()[dst][SV];
+            for (auto next : svSuccs)
+            {
+                if (!graph->hasEdge(next, src, PV))
+                {
+                    graph->addEdge(next, src, PV);
+                    graph->addEdge(src, next, VPBar);
+                    workList.push(CFLREdge(next, src, PV));
+                    workList.push(CFLREdge(src, next, VPBar));
+                }
+            }
+        }
+
+        // Rule 4: VF -> Store VP
+        // p --Store--> q, q --VP--> o implies p --VF--> o
+        if (label == Store)
+        {
+            auto &vpSuccs = graph->getSuccessorMap()[dst][VPBar];
+            for (auto next : vpSuccs)
+            {
+                if (!graph->hasEdge(src, next, VF))
+                {
+                    graph->addEdge(src, next, VF);
+                    graph->addEdge(next, src, FVBar);
+                    workList.push(CFLREdge(src, next, VF));
+                    workList.push(CFLREdge(next, src, FVBar));
+                }
+            }
+        }
+        if (label == VPBar)
+        {
+            auto &storePreds = graph->getPredecessorMap()[src][Store];
+            for (auto prev : storePreds)
+            {
+                if (!graph->hasEdge(prev, dst, VF))
+                {
+                    graph->addEdge(prev, dst, VF);
+                    graph->addEdge(dst, prev, FVBar);
+                    workList.push(CFLREdge(prev, dst, VF));
+                    workList.push(CFLREdge(dst, prev, FVBar));
+                }
+            }
+        }
+
+        // Rule 5: VA -> VF PV
+        // p --VF--> o1, o1 --PV--> o2 implies p --VA--> o2
+        if (label == VF)
+        {
+            auto &pvSuccs = graph->getSuccessorMap()[dst][PV];
+            for (auto next : pvSuccs)
+            {
+                if (!graph->hasEdge(src, next, VA))
+                {
+                    graph->addEdge(src, next, VA);
+                    graph->addEdge(next, src, AVBar);
+                    workList.push(CFLREdge(src, next, VA));
+                    workList.push(CFLREdge(next, src, AVBar));
+                }
+            }
+        }
+        if (label == PV)
+        {
+            auto &vfPreds = graph->getPredecessorMap()[src][VF];
+            for (auto prev : vfPreds)
+            {
+                if (!graph->hasEdge(prev, dst, VA))
+                {
+                    graph->addEdge(prev, dst, VA);
+                    graph->addEdge(dst, prev, AVBar);
+                    workList.push(CFLREdge(prev, dst, VA));
+                    workList.push(CFLREdge(dst, prev, AVBar));
+                }
+            }
+        }
+
+        // Rule 6: LV -> Load VP
+        // p --Load--> q, q --VP--> o implies p --LV--> o
+        if (label == Load)
+        {
+            auto &vpSuccs = graph->getSuccessorMap()[dst][VPBar];
+            for (auto next : vpSuccs)
+            {
+                if (!graph->hasEdge(src, next, LV))
+                {
+                    graph->addEdge(src, next, LV);
+                    graph->addEdge(next, src, VLBar);
+                    workList.push(CFLREdge(src, next, LV));
+                    workList.push(CFLREdge(next, src, VLBar));
+                }
+            }
+        }
+        if (label == VPBar)
+        {
+            auto &loadPreds = graph->getPredecessorMap()[src][Load];
+            for (auto prev : loadPreds)
+            {
+                if (!graph->hasEdge(prev, dst, LV))
+                {
+                    graph->addEdge(prev, dst, LV);
+                    graph->addEdge(dst, prev, VLBar);
+                    workList.push(CFLREdge(prev, dst, LV));
+                    workList.push(CFLREdge(dst, prev, VLBar));
+                }
+            }
+        }
+
+        // Rule 7: PV -> LV VA
+        // p --LV--> o1, o1 --VA--> o2 implies p --PV--> o2
+        if (label == LV)
+        {
+            auto &vaSuccs = graph->getSuccessorMap()[dst][VA];
+            for (auto next : vaSuccs)
+            {
+                if (!graph->hasEdge(src, next, PV))
+                {
+                    graph->addEdge(src, next, PV);
+                    graph->addEdge(next, src, VPBar);
+                    workList.push(CFLREdge(src, next, PV));
+                    workList.push(CFLREdge(next, src, VPBar));
+                }
+            }
+        }
+        if (label == VA)
+        {
+            auto &lvPreds = graph->getPredecessorMap()[src][LV];
+            for (auto prev : lvPreds)
+            {
+                if (!graph->hasEdge(prev, dst, PV))
+                {
+                    graph->addEdge(prev, dst, PV);
+                    graph->addEdge(dst, prev, VPBar);
+                    workList.push(CFLREdge(prev, dst, PV));
+                    workList.push(CFLREdge(dst, prev, VPBar));
+                }
+            }
+        }
+
+        // Rule 8: PT -> PV (final points-to result)
+        // p --PV--> o implies p --PT--> o
+        if (label == PV)
+        {
+            if (!graph->hasEdge(src, dst, PT))
+            {
+                graph->addEdge(src, dst, PT);
+                graph->addEdge(dst, src, PTBar);
+                workList.push(CFLREdge(src, dst, PT));
+                workList.push(CFLREdge(dst, src, PTBar));
             }
         }
     }
